@@ -1,7 +1,7 @@
 ---
 title: "PLM - Prediction Assignment Writeup"
 author: "S Nenning"
-date: "7 October 2018"
+date: "9 October 2018"
 output: html_document
 ---
 
@@ -9,9 +9,10 @@ output: html_document
 # initial settings and load of required packages
 knitr::opts_chunk$set(echo = TRUE)
 
-library(ggplot2)
+
 library(caret)
-library(rattle)
+library(randomForest)
+library(gbm)
 ```
 
 # 1. Synopsis
@@ -23,7 +24,7 @@ The machine learning algorithm (prediction) model is tested on the 20 test cases
 The data for this project come from this source: <http://groupware.les.inf.puc-rio.br/har>. 
 
 #### Summary  
-3 machine learning algorithm methods have been validated. **Random Forest** with an accuracy of **0.95** has been selected for predicting the outcome for the 20 test cases, which is:  
+2 machine learning algorithm methods have been validated. **Random Forest** with an accuracy of **0.99** has been selected for predicting the outcome for the 20 test cases, which is:  
   
 [1] B A C A A E D B A A B C B A E E A B B B
   
@@ -31,38 +32,48 @@ The data for this project come from this source: <http://groupware.les.inf.puc-r
 # 2. Data Analysis
 
 ### Loading and preprocessing the data
-As the first step, data files are downloaded from website, when not downlaoded previously to R working directory, and read it into R.
+As the first step, data files are downloaded from website, when not downlaoded previously to R working directory, and read it into R as 'raw' pml training (pml_training_raw) and 'raw' pml testing (pml_testing_raw) dataframe.
 ```{r data_analysis_load}
 # download files only  if not yet existing in working directory
 if (!file.exists("pml-training.csv")) {
   fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
   download.file(fileUrl, destfile = "pml-training.csv", method = "curl")
 }
-pml_training <- read.csv(file = "pml-training.csv", header = TRUE, na.strings = "NA")
+pml_training_raw <- read.csv(file = "pml-training.csv", header = TRUE, na.strings = "NA")
 if (!file.exists("pml-testing.csv")) {
   fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
   download.file(fileUrl, destfile = "pml-testing.csv", method = "curl")
 }
-pml_testing <-  read.csv(file = "pml-testing.csv", header = TRUE, na.strings = "NA")
+pml_testing_raw <-  read.csv(file = "pml-testing.csv", header = TRUE, na.strings = "NA")
 ```
 
 A brief exploratory data analysis is done to understand the data content and number of available records. 
-The training data (*pml_training*) contains `r ncol(pml_training)` columns with `r nrow(pml_training)` records. I subset the data into the outcome variable *classe* and predictors, which is the accelerometers data of the sensors on the participants' belt, forearm, arm, and dumbell. Subset for predictors is created from the variable name beginning with '*accel*'.
-```{r data_analysis_EDA}
-# basic data exploratory and subsetting data
-training_pos_accel <-  grep("^accel", names(pml_training))
-pml_training <- cbind("classe" = pml_training$classe, pml_training[,training_pos_accel])
+The training data (*pml_training_raw*) contains `r ncol(pml_training_raw)` columns with `r nrow(pml_training_raw)` records. 
+The structure of the 'pml_training_raw' data contains variables with NA and #DIV/0! values (please refer to appendix to see the data structure) which cannot be used for prediction. Hence, I remove them from data set, so do I with user and data record descriptive variables in the data set (columns 1 to 7) like user name and time stamp.  
+The outcome variable **classe** is in the last column of cleansed training data set (**pml_training**).  
+I reduce the testing data (**pml_testing**) to the same predictor variables; outcome variable 'classe' is not included in testing data since it will be predicted.  
+  
+```{r data_analysis_EDA1}
+# data cleansing NA
+pml_training <- pml_training_raw[,colSums(is.na(pml_training_raw))==0]
+# data cleansing columns with #DIV/0!
+pml_training <- pml_training[,colSums(sapply(pml_training, function(x) grepl("#DIV/0!",x)))==0]
+# remove user and data record descriptive variables
+pml_training <- pml_training[,-c(1:7)]
 
-str(pml_training)
+#testing data is reduced to the same columns as training data (excluding outcome variable 'classe' which is in the last column of training data)
+col_test <- names(pml_training[,-ncol(pml_training)])
+testing <-  pml_testing_raw[,col_test]
 ```
-Please see above the structure of the subset created with outcome and predictor variables. There are 12 predictors; x,y,z variables for each sensor. Outcome variable *classe* is a factor calling for a **classification machine learning algorthm** model. Multiple models are looked at, next.
+The cleansed training data (*pml_training*) contains `r ncol(pml_training)` columns. Please refer to appendix for structure of cleansed training data.  
+Outcome variable *classe* is a factor calling for a **classification machine learning algorthm** model. 2 models are looked at, next.
 
 ### Machine Learning Algorithm models
 
 #### Preparing data
 The training data is split into 'training' and 'validation' data using a split ratio of 0.7. The training data is used to 'train' the models; the 'validation' data for validating the model afterwards.
-The downloaded test data is subsetted on the same predictor variables as the training data. Data 'testing' is used to the predict the classification for the 20 test cases included in the test data.
-```{r data_model, cache=TRUE}
+Data 'testing' is used to the predict the classification for the 20 test cases included in the test data.
+```{r data_model}
 # setting seed to get same sample set when creating data partition.
 set.seed(12321)
 intrain <- createDataPartition(pml_training$classe, p=0.7, list = FALSE)
@@ -70,43 +81,28 @@ intrain <- createDataPartition(pml_training$classe, p=0.7, list = FALSE)
 training <- pml_training[intrain,]
 validation <-  pml_training[-intrain,]
 
-# Downloaded test data is subsetted on the same predictor variables as the training data.
-testing <-  pml_testing[,training_pos_accel]
-
 ```
 The 'training' data contains `r nrow(training)` records, 'validation' data `r nrow(validation)` records, and 'testing' `r nrow(testing)` records.
   
 #### Fitting the model
 
-I have chosen to use 3 different classification machine learning algorthm for fitting the model. The 'Final Model' values are printing for each model.
+I have chosen to use 2 different classification machine learning algorthm for fitting the model. The 'Final Model' values are printing for each model.  
   
-##### a.) Fitting Model using **Decision tree** algorithm
-The logic of decision tree is to partition the data considering a set of questions (nodes), using as first method **rpart** in *train* funcion from package *caret*.
-```{r data_analysis_pred_model_rpart, cache = TRUE}
-# fit a model with tree
-modfit_rpart <- train(classe ~., data = training, method = "rpart")
-print(modfit_rpart$finalModel)
-plot(modfit_rpart$finalModel, uniform = TRUE, main = "Classification Tree")
-text(modfit_rpart$finalModel, use.n = TRUE, all = TRUE, cex=.8)
-```
-  
-Fig1: Classification Tree showing nodes and branches of the classification
-
-  
-##### b.) Fitting Model using **Random Forest** algorithm
-Random forests creates decision trees on randomly selected data samples, gets prediction from each tree and selects the best solution. I'm using method **rf** in *train* funcion from package *caret*
-```{r data_analysis_pred_model_rf, cache = TRUE}
+##### a.) Fitting Model using **Random Forest** algorithm
+Random forests creates decision trees on randomly selected data samples, gets prediction from each tree and selects the best solution. I'm using *randomForest* funcion from package *randomforest*
+```{r data_analysis_pred_model_rf, cache=FALSE}
 # fit a model with random forest
-modfit_rf <- train(classe ~., data = training, method = "rf")
-print(modfit_rf$finalModel)
+modfit_rf<-randomForest(classe ~., data = training, ntree = 50)
+print(modfit_rf)
+
 ```
   
-##### c.) Fitting Model using **Gradient boosting modelling**
+##### b.) Fitting Model using **Gradient boosting modelling**
 Boosting is another approach to improve the predictions resulting from a decision tree. Trees are 'grown' sequentially: each tree is grown using information from previously grown trees. I'm using method **gbm** in *train* funcion from package *caret*.
-```{r data_analysis_pred_model_gbm, cache = TRUE}
+```{r data_analysis_pred_model_gbm, cache=TRUE}
 # fit a model with boosting
-modfit_gbm <- train(classe ~., data = training, method = "gbm", verbose = FALSE)
-print(modfit_gbm$finalModel)
+modfit_gbm <- train(classe ~., data = training, method = "gbm", verbose = FALSE, trControl = trainControl(method = 'cv', number=5))
+print(modfit_gbm)
 ```
   
   
@@ -114,41 +110,30 @@ print(modfit_gbm$finalModel)
 The Machine Learning Algorithm models are validated against the 'validation' data.  
 Steps taken for each model is to:  
 - Predict the outcome value (variable *classe*) with the model using the validation data.  
-- Plot the predicted values (see histograms Fig2 to Fig4 below)  
-- Present a table showing actual outcome values from the validation data versus the predicted outcome values using the model.  
+- Plot the predicted values (see histograms Fig1 to Fig2 below)  
 - Compute and print confusion matrix to get model parameters like accuracy of prediction model.  
-```{r data_analysis_pred_val, cache = FALSE}
-# Prediction with tree model
-pred_rpart <- predict(modfit_rpart, newdata  = validation)
-plot(pred_rpart, main = "Predictions - Decision Tree Model")
-table(validation$classe, pred_rpart)
-cfm_rpart <- confusionMatrix(validation$classe, pred_rpart)
-print(cfm_rpart)
-
+```{r data_analysis_pred_val}
 # Prediction with random forest model
 pred_rf <- predict(modfit_rf, newdata  = validation)
 plot(pred_rf, main = "Predictions - Random Forest Model")
-table(validation$classe, pred_rf)
 cfm_rf <- confusionMatrix(validation$classe, pred_rf)
 print(cfm_rf)
 
 # Prediction with boosting model
 pred_gbm <- predict(modfit_gbm, newdata  = validation)
 plot(pred_gbm, main = "Predictions - Gradient Boosting Modelling")
-table(validation$classe, pred_gbm)
 cfm_gbm <- confusionMatrix(validation$classe, pred_gbm)
 print(cfm_gbm)
 ```
   
-The 3 models have following **accuracy**; values are retrieved from confusion matrix of model:  
-- Decision Tree: `r cfm_rpart$overall["Accuracy"]`  
-- Random Forest: `r cfm_rf$overall["Accuracy"]`  
-- Gradient Boosting: `r cfm_gbm$overall["Accuracy"]`  
+The 2 models have following **accuracy**; values are retrieved from confusion matrix of model:  
+- Random Forest: `r round(cfm_rf$overall["Accuracy"],2)`  
+- Gradient Boosting: `r round(cfm_gbm$overall["Accuracy"],2)`  
   
 
 ## Results
 
-Based on the accuracy of the models, I select the model using the **Random Forest** Machine Learning Algorithm with an accuracy of `r cfm_rf$overall["Accuracy"]` against the validation data.  
+Based on the accuracy of the models, I select the model using the **Random Forest** Machine Learning Algorithm with an accuracy of `r round(cfm_rf$overall["Accuracy"],2)` against the validation data.  
   
 The predicted outcome for the 20 test cases from the testing data is printed below.
 ```{r results_test}
@@ -158,3 +143,20 @@ pred_rf_test
 
 ```
 
+## Appendix
+  
+### Additional information
+
+#### Data Structure of Training Data (pml_training_raw, before manipulation)
+```{r Appendix1}
+# Structure of training data (raw)
+str(pml_training_raw)
+
+```
+
+#### Data Structure of cleansed Training Data (pml_training, after manipulation)
+```{r Appendix2}
+# Structure of training data
+str(pml_training)
+
+```
